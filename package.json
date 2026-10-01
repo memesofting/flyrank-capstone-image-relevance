@@ -1,0 +1,31 @@
+{
+  "name": "flyrank-capstone-image-relevance",
+  "version": "1.0.0",
+  "description": "AI image understanding and content matching engine",
+  "homepage": "https://github.com/memesofting/flyrank-capstone-image-relevance#readme",
+  "bugs": {
+    "url": "https://github.com/memesofting/flyrank-capstone-image-relevance/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/memesofting/flyrank-capstone-image-relevance.git"
+  },
+  "license": "MIT",
+  "author": "memesofting",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "dev": "nodemon src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.0",
+    "dotenv": "^18.0.5",
+    "express": "^5.2.1",
+    "multer": "^2.4.0",
+    "nodemon": "^3.1.14",
+    "pg": "^8.23.1",
+    "sharp": "^0.35.5",
+    "zod": "^4.6.5"
+  }
+}
