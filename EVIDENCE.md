@@ -580,3 +580,190 @@ gh repo view --json name,visibility,url   # expect PUBLIC
 
 Until that reports `PUBLIC`, the repository-visibility half of the Phase 1 gate
 and of `docs/SUBMISSION.md` is unconfirmed. It is not claimed as met.
+---
+---
+
+# Evidence — Phase 2 (vision pipeline)
+
+Status: **incomplete.** 57 of 61 corpus images analysed. The gate requires all
+61; the shortfall is caused by the free tier's per-model daily cap, not by the
+pipeline. See `docs/adr/004-vision-model-availability.md`.
+
+## A. Gate checklist
+
+| Gate requirement | Status | Evidence |
+|---|---|---|
+| Vision responses schema-validated before trust | met | §B |
+| Invalid vision output never accepted | met | §C |
+| Low-confidence classifications flagged | met | §D |
+| Vision and embedding work in background jobs | met | §E |
+| Jobs retry, track progress, track cost | met | §F |
+| Image embeddings persisted | met | §G |
+| Cost recorded per call | met | §H |
+| Budget guard stops or flags overrun | met | §H |
+| All 61 images analysed | **not met** (57/61) | §I |
+
+## B. Schema validation is the trust boundary
+
+The provider is asked for structured JSON via a strict Zod-derived schema and
+its response is parsed before any application code sees it.
+
+```
+$ node -e 'const {analyseImage}=await import("./src/ai/providers/...")'
+```
+
+Enforced, all covered by `tests/unit/visionSchema.test.js`:
+
+- `subject` is a controlled vocabulary (`bear`, `deer`, `dog`, `fox`, `wolf`,
+  `other`). An earlier version accepted any string, so `subject: "dragon"`
+  validated. Caught and closed.
+- Unknown keys, wrong types, and out-of-range confidence are rejected.
+- A missing or malformed field yields `INVALID`, never a partial record.
+
+## C. Invalid provider output is not accepted
+
+`tests/integration/pipeline.test.js` drives the real service with a provider that
+returns malformed JSON. Observed behaviour:
+
+- `validation_status` is not written to `image_metadata`.
+- The raw response **is** persisted to `ai_calls`, so the failure is inspectable.
+- No embedding is enqueued for it.
+
+Recorded honestly: the provider call itself is `SUCCESS` in `ai_calls`, because
+the HTTP request did succeed — the *content* was unusable. Whether a validation
+failure should carry its own status on the job is not yet settled, and is listed
+as an open item rather than claimed either way.
+
+## D. Confidence distribution
+
+All 57 analyses validated `VALID`. None were flagged `LOW_CONFIDENCE`.
+
+| | |
+|---|---|
+| Valid | 57 |
+| Low confidence | 0 |
+| Invalid | 0 |
+| Mean confidence | 0.9796 |
+| Minimum | 0.9500 |
+| Maximum | 1.0000 |
+| Below 0.80 | 0 |
+
+A 0.95 floor across 61 images is suspiciously tight for vision models, and worth
+saying rather than presenting as a quality win: the confidence is
+model-reported in the same structured response that the model also self-scores,
+so it measures how consistently these specific models phrased their own output,
+not how correct the descriptions are. Phase 4's precision measurement, not this
+column, is the real accuracy signal.
+
+## E. Work happens in background jobs
+
+```
+images  PENDING 4 / READY 57
+jobs    vision.understand  COMPLETED 9, PENDING 4
+        embedding.embed    COMPLETED 10
+```
+
+Verified without stubs, against real failures:
+
+- Real HTTP 503s were retried and succeeded.
+- Real quota walls were detected, the job parked with `reclaimable_at`, and the
+  run exited cleanly rather than exhausting retries.
+- A quota rejection does **not** consume an attempt (`deferJob` decrements).
+- A short per-minute window is waited out and the run continues; a daily window
+  is parked. Covered by tests for both branches.
+
+## F. Idempotency and resume
+
+Corpus ingestion was run repeatedly across many provider switches without
+creating duplicate work:
+
+- Vision jobs keyed by image + model + prompt version.
+- Embedding jobs carry the exact `metadataId` (migration `007`).
+- Images already holding a `VALID`/`LOW_CONFIDENCE` analysis are not re-queued,
+  so switching models does not re-derive the whole corpus.
+
+## G. Embeddings persisted
+
+57 of 57 analysed images have an embedding. 768 dimensions, normalised, with
+source metadata ID, provider, and model recorded.
+
+The remaining 4 images have no embedding because they have no analysis.
+
+## H. Cost tracking and budget guard
+
+`npm run costs` reports per-window and per-model totals from `ai_calls`.
+
+**Caveat, stated rather than buried:** the integration suite used to run
+`DELETE FROM ai_calls` unscoped, so running the tests deleted the real cost rows.
+The sentinel-verified fix is in `tests/integration/pipeline.test.js`; the rows
+themselves are gone. Figures below are transcribed from the run logs at the time
+of each run.
+
+| Run | Model | Vision calls | Failed | Cost |
+|---|---|---|---|---|
+| 1 | `gemini-3.5-flash` | 9 ok + quota | 1 | ~$0.010 |
+| 2 | `gemini-3.6-flash` | 15 ok, 2 quota | 2 | $0.0101 |
+| 3 | `gemini-3.1-flash-lite` | 33 ok, 1 failed | 1 | $0.0172 |
+| 4 | `gemini-3.7-flash` | 7 ok | 3 | $0.0000 |
+| 5 | `gemini-3.1-flash-lite-preview` | 2 ok | 0 | $0.0000 |
+
+Paid-list estimate for the full 61 on one model is ~$0.32. Actual billing is
+$0 at this tier; the estimate exists so the budget guard has something to test
+against rather than a hardcoded zero.
+
+Budget guard: parameterized daily and monthly windows in `src/ai/cost/budgetGuard.js`.
+
+## I. Why 57 and not 61
+
+Measured quota, this API key, 2026-10-02:
+
+| Model | Quota | Window |
+|---|---|---|
+| `gemini-3.8-flash` | `limit: 20` | ~3h |
+| `gemini-3.5-flash` | `limit: 20` | ~2h49m |
+| `gemini-3.6-flash` | `limit: 5` | ~31s |
+| `gemini-3.1-flash-lite` | worked | — |
+
+Roughly 20 successful `generateContent` calls per model per day. 61 images
+cannot be analysed on one model in one day.
+
+Per-model analysis counts, every row recording the model that produced it:
+
+| Model | Valid |
+|---|---|
+| `gemini-3.1-flash-lite` | 33 |
+| `gemini-3.6-flash` | 15 |
+| `gemini-3.7-flash` | 7 |
+| `gemini-3.1-flash-lite-preview` | 2 |
+| **Total** | **57** |
+
+The 4 outstanding images are `dog-003`, `dog-004`, `dog-005`, `dog-008`. They are
+`PENDING` with parked vision jobs and will be picked up by
+`npm run process:corpus` once any model's window resets.
+
+Two further provider models are unusable on this account
+(`gemini-2.5-flash-lite` closed to new users; `gemini-flash-lite-latest` HTTP
+400), so the pool had to be listed explicitly.
+
+## J. Tests
+
+`npm run test:all` — **184 pass, 0 fail**.
+
+- 184 tests run with stub providers, no API key, no network, no spend.
+- Integration cleanup verified with a sentinel row: a real audit row inserted
+  before the suite is still present after it.
+- `make check` (migrations + full suite + corpus verify) passes.
+
+## K. Phase 2 gate status
+
+**Not met.** The pipeline is complete and verified; the corpus is not.
+
+Outstanding, in order:
+
+1. Analyse the remaining 4 images once a quota window resets.
+2. Decide whether a validation failure needs a distinct job status (§C).
+3. Confirm whether Phase 2 requires HTTP visibility routes, or whether CLI plus
+   database satisfies the cost-visibility requirement.
+4. Phase 4 must state whether its precision figure is single-model or pooled.
+
+Do not report this phase as complete until item 1 is done and the count reads 61.

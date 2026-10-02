@@ -223,6 +223,37 @@ export async function deferJob(id, { error, delayMs }) {
   return rows[0] ? stripInternalColumns(rows[0]) : null;
 }
 
+/**
+ * Return a claimed job to the queue WITHOUT parking it.
+ *
+ * Used when a provider rate limit is short enough to wait out — gemini-3.6-flash
+ * reports "limit: 5, retry in 30.9s", which is a per-minute limit rather than a
+ * daily one. Unlike deferJob this sets no reclaimable_at, so the job is
+ * immediately claimable again, and it keeps the attempt count: the call really
+ * was made, and pretending otherwise would hide how hard a limit is biting.
+ *
+ * @param {string} id
+ * @param {object} options
+ * @param {string} options.error reason, persisted for the operator
+ * @returns {Promise<object | null>}
+ */
+export async function releaseJob(id, { error }) {
+  const { rows } = await query(
+    `UPDATE jobs SET
+       status         = 'PENDING',
+       last_error     = $2,
+       progress       = 0,
+       started_at     = NULL,
+       completed_at   = NULL,
+       reclaimable_at = NULL
+      WHERE id = $1
+      RETURNING ${COLUMNS}`,
+    [id, error],
+  );
+
+  return rows[0] ? stripInternalColumns(rows[0]) : null;
+}
+
 /** Update progress for an in-flight job. */
 export async function updateJobProgress(id, progress) {
   const { rows } = await query(

@@ -32,9 +32,10 @@ describe('classifyQuota', () => {
   it('recognises real free-tier quota exhaustion and defers for the stated window', () => {
     const result = classifyQuota(OBSERVED, 429);
     assert.equal(result.quota, true);
-    // 3h14m13.07s. Deferring for the provider's own window is the whole point:
-    // retrying sooner cannot succeed.
-    assert.equal(result.retryAfterMs, 11_653_071);
+    // 3h14m13.07s, plus a 10% margin so the next attempt does not land exactly
+    // on the boundary and earn another rejection. Deferring for the provider's
+    // own window is the whole point: retrying sooner cannot succeed.
+    assert.equal(result.retryAfterMs, 12_818_378);
   });
 
   it('does not treat an ordinary 503 as a quota wall', () => {
@@ -52,12 +53,28 @@ describe('classifyQuota', () => {
     assert.equal(isTransientStatus(401), false);
   });
 
-  it('parses minute and second-only windows', () => {
-    assert.equal(classifyQuota('quota exceeded, retry in 2m30s', 429).retryAfterMs, 150_000);
-    // Floored to one minute, not shortened: a provider asking for 45s still
-    // gets 60s, because anything tighter risks a retry loop against a limit
-    // that has not reset.
-    assert.equal(classifyQuota('quota exceeded, retry in 45s', 429).retryAfterMs, 60_000);
+  it('parses minute and second-only windows, with a safety margin', () => {
+    // 10% margin: 2m30s -> 165s, 45s -> 49.5s. Anything tighter risks landing
+    // on the boundary and earning another rejection, which would extend the
+    // limit rather than respect it.
+    assert.equal(classifyQuota('quota exceeded, retry in 2m30s', 429).retryAfterMs, 165_000);
+    assert.equal(classifyQuota('quota exceeded, retry in 45s', 429).retryAfterMs, 49_500);
+  });
+
+  it('reports a per-minute limit as a short window, not a long one', () => {
+    // Measured: gemini-3.6-flash answers "limit: 5" / "retry in 30.9s". This is
+    // a rideable RPM limit, and the runner waits it out. Rounding it up to a
+    // minute would have made a 61-image corpus need four separate manual runs.
+    const result = classifyQuota(
+      'Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, '
+      + 'limit: 5, model: gemini-3.6-flash\nPlease retry in 30.904484641s.',
+      429,
+    );
+    assert.equal(result.quota, true);
+    assert.ok(
+      result.retryAfterMs < 120_000,
+      `expected a sub-2-minute window so the runner waits rather than parks, got ${result.retryAfterMs}ms`,
+    );
   });
 
   it('falls back to an hour when a quota wall states no window', () => {
@@ -69,8 +86,9 @@ describe('classifyQuota', () => {
     );
   });
 
-  it('never returns a deferral shorter than a minute', () => {
-    assert.ok(classifyQuota('quota exceeded, retry in 0s', 429).retryAfterMs >= 60_000);
+  it('never returns a deferral shorter than five seconds', () => {
+    // A provider reporting "retry in 0s" must not produce a tight retry loop.
+    assert.equal(classifyQuota('quota exceeded, retry in 0s', 429).retryAfterMs, 5_000);
   });
 
   it('leaves non-quota 429 rate limiting to ordinary backoff', () => {

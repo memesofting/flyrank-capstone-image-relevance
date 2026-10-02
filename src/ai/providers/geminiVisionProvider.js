@@ -119,6 +119,34 @@ export class GeminiVisionProvider {
       },
     });
 
+    // generateContent-specific response checks live here, not in the shared
+    // transport, because embedContent has a different shape and would be
+    // rejected by them.
+    //
+    // A 200 can still carry an error block, and a candidate list can come back
+    // empty when the request was blocked. Both would otherwise surface as an
+    // unhelpful "cannot read properties of undefined" further downstream.
+    const blockReason = data.promptFeedback?.blockReason;
+    if (blockReason) {
+      throw new ProviderError(`Gemini blocked the request: ${blockReason}`, {
+        provider: 'gemini',
+        model: this.model,
+        status: 200,
+        transient: false,
+        body: data.promptFeedback,
+      });
+    }
+
+    if (!Array.isArray(data.candidates) || data.candidates.length === 0) {
+      throw new ProviderError(`Gemini returned no candidates from ${this.model}:generateContent`, {
+        provider: 'gemini',
+        model: this.model,
+        status: 200,
+        transient: true,
+        body: data,
+      });
+    }
+
     const text = extractCandidateText(data);
 
     // Truncation is a transport-level problem, not a validation one: the JSON is

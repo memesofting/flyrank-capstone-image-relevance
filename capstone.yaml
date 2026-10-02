@@ -7,8 +7,8 @@ project:
   name: flyrank-capstone-image-relevance
   title: AI Image Understanding & Content Matching Engine
   track: FlyRank Backend Track
-  phase: 1
-  phase_status: complete
+  phase: 2
+  phase_status: in_progress
   language: javascript
   runtime: node.js
   license: MIT
@@ -43,13 +43,28 @@ test: npm test
 test_integration: npm run test:integration
 test_all: npm run test:all
 
+# --- vision pipeline (Phase 2) ---------------------------------------------
+# Analyses the whole corpus and embeds every caption. Resumable: a run that
+# hits a quota wall parks its jobs and exits, and the next run picks up where
+# it left off.
+process: npm run process:corpus
+# Useful variants:
+#   --limit=25                      only the first 25 images
+#   --model=gemini-3.1-flash-lite   pin one model for the whole run
+#   --no-fallback                   never switch models
+#   --no-ingest                     run existing jobs only, skip the corpus scan
+#   --model-pool=a,b,c              deliberately span several models (see ADR 004)
+process_dry: npm run process:corpus -- --dry-run
+costs: npm run costs
+
 # --- evaluation ------------------------------------------------------------
 # Phase 4. Not implemented yet; top-1 precision is not yet measured.
 eval: npm run eval
 eval_status: not_implemented
 
 # --- endpoints -------------------------------------------------------------
-# Phase 1 implemented:
+# Phase 1 implemented. Phase 2 is worker-side and deliberately exposes no new
+# routes yet; visibility is via `npm run process:corpus` and `npm run costs`.
 endpoints:
   - GET /health
   - GET /health/ready
@@ -57,7 +72,7 @@ endpoints:
   - GET /api/posts
   - GET /api/posts/:id
 
-# Planned for Phases 2-4, not yet implemented:
+# Planned for Phases 3-4, not yet implemented:
 endpoints_planned:
   - POST /api/images
   - GET /api/images
@@ -90,12 +105,35 @@ dataset:
   license: Unsplash License
 
 # --- measured results ------------------------------------------------------
+# Counted from `npm run test:all`, 2026-10-02.
 metrics:
-  tests_total: 104
-  tests_passing: 104
-  unit_tests: 77
-  integration_tests: 27
+  tests_total: 184
+  tests_passing: 184
+  unit_tests: 134
+  integration_tests: 50
   top1_precision: null   # not measured until Phase 4
+
+# Phase 2 corpus progress. The gate needs 61; the free tier allows roughly 20
+# generateContent calls per model per day, so this finished across four models.
+# See docs/adr/004-vision-model-availability.md.
+vision_corpus:
+  images_total: 61
+  images_analysed: 57
+  images_pending: 4
+  analyses_valid: 57
+  analyses_low_confidence: 0
+  analyses_invalid: 0
+  mean_confidence: 0.9796
+  min_confidence: 0.9500
+  embeddings_persisted: 57
+  embedding_dimensions: 768
+  vision_models_used:
+    - gemini-3.1-flash-lite        # 33 images
+    - gemini-3.6-flash              # 15 images
+    - gemini-3.7-flash              #  7 images
+    - gemini-3.1-flash-lite-preview #  2 images
+  embedding_model: gemini-embedding-001
+  phase_2_gate: not_met_pending_4_images
 
 documentation:
   design: docs/ONE-PAGE-DESIGN.md
@@ -104,5 +142,6 @@ documentation:
   database: docs/DATABASE.md
   dataset_doc: docs/DATASET.md
   adrs: docs/adr
+  ai_pipeline: docs/AI-PIPELINE.md
   evidence: EVIDENCE.md
   buildlog: BUILDLOG.md

@@ -113,18 +113,50 @@ function stubEmbedding(vector) {
   };
 }
 
+/**
+ * Remove only rows this suite created.
+ *
+ * These statements used to be `DELETE FROM jobs` / `DELETE FROM ai_calls` with
+ * no WHERE clause. That is destructive: the suite runs against the same
+ * database as the real corpus, so a plain `npm run test:integration` silently
+ * deleted the cost audit trail of every real provider call. It was noticed only
+ * because 57 real image analyses survived while every ai_call row describing
+ * their cost had already gone.
+ *
+ * Fixtures are identified by provider name and by job type instead, so real
+ * corpus work is left intact.
+ */
+async function deleteSuiteFixtures() {
+  // Order matters: jobs are identified partly through ai_calls, so that join
+  // has to run before ai_calls is cleared.
+  await query(
+    `DELETE FROM jobs
+      WHERE type LIKE 'test.%'
+         OR id IN (SELECT j.id
+                     FROM jobs j
+                     JOIN ai_calls c ON c.job_id = j.id
+                    WHERE c.provider LIKE 'stub%')
+         OR entity_id IN (SELECT id FROM images
+                           WHERE storage_key LIKE $1)`,
+    [`${fixtureDir.replace(/\\/g, '\\\\')}%`],
+  );
+  await query(
+    `DELETE FROM ai_calls WHERE provider LIKE 'stub%'`,
+  );
+}
+
 before(async () => {
   fixtureDir = await mkdtemp(join(tmpdir(), 'flyrank-pipeline-'));
 
-  // Leave the database as found so repeated runs stay deterministic. Only rows
-  // this suite's own fixtures create are removed, and images is left alone
-  // because a real corpus may be present.
-  await query(`DELETE FROM jobs`);
-  await query(`DELETE FROM ai_calls`);
+  await deleteSuiteFixtures();
 });
 
 after(async () => {
-  await query(`DELETE FROM jobs`);
+  // Remove this suite's own fixtures, identified by the temp storage_key rather
+  // than by a flag. An earlier version left 288 image rows behind, which is how
+  // the corpus count reached 349 while the manifest lists 61.
+  await deleteSuiteFixtures();
+  await query(`DELETE FROM images WHERE storage_key LIKE $1`, [`${fixtureDir.replace(/\\/g, '\\\\')}%`]);
   await closePool();
 });
 
@@ -262,9 +294,11 @@ describe('job runner: quota exhaustion', () => {
 
   it('reclaims a deferred job once its window has passed', async () => {
     const image = await makeImage();
+    // A DAILY limit, well past the runner's two-minute threshold, so this takes
+    // the park-and-exit path rather than the wait-and-continue path.
     const quotaError = new ProviderError('quota', {
       provider: 'stub', model: 'm', status: 429, transient: true,
-      quota: true, retryAfterMs: 60_000,
+      quota: true, retryAfterMs: 3 * 60 * 60 * 1000,
     });
 
     registerHandler('test.quota-reclaim', async () => { throw quotaError; });
@@ -288,7 +322,39 @@ describe('job runner: quota exhaustion', () => {
     assert.equal(reclaimed.attempts, 1);
   });
 
-  it('stops the batch on quota rather than working through the whole queue', async () => {
+  it('waits out a short rate limit instead of parking the work', async () => {
+    // gemini-3.6-flash reports "limit: 5, retry in 30.9s". Parking that would
+    // mean an operator had to re-run the corpus to finish it, so the runner
+    // waits and carries on within the same run.
+    const image = await makeImage();
+    let attempts = 0;
+
+    registerHandler('test.rpm', async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new ProviderError('quota exceeded for metric: free_tier_requests, limit: 5', {
+          provider: 'stub', model: 'm', status: 429, transient: true,
+          quota: true, retryAfterMs: 5_000,
+        });
+      }
+      return { ok: true };
+    });
+
+    await jobsRepository.enqueueJob({
+      type: 'test.rpm', entityType: 'image', entityId: image.id,
+      idempotencyKey: `rpm-${image.id}`, maxAttempts: 3,
+    });
+
+    const summary = await runUntilEmpty({ type: 'test.rpm' });
+
+    assert.equal(summary.waited, 1, 'the short limit should be waited out');
+    assert.equal(summary.completed, 1, 'the job should then complete in the same run');
+    assert.equal(summary.stoppedByQuota, false, 'a short limit must not end the run');
+    assert.equal(attempts, 2);
+    await query(`DELETE FROM jobs WHERE type = 'test.rpm'`);
+  });
+
+  it('stops the batch on a daily quota rather than working through the queue', async () => {
     // The limit is per model, so every remaining job would hit the same wall.
     // Continuing would defer 60 more jobs one at a time and bury the message.
     let calls = 0;

@@ -539,3 +539,148 @@ gh repo view --json name,visibility,url   # confirm the repo is public
 `docs/SUBMISSION.md` requires a *public* dedicated repository. Pushing and
 confirming visibility is a GitHub operation, not a local one. Do not report the
 submission as complete until `visibility` reads `PUBLIC`.
+---
+---
+
+# Phase 2 — vision pipeline
+
+All entries: **2026-10-02**, continuing the session above.
+
+Scope note: Phase 1's log says "no vision call, embedding, matching, or mismatch
+guard was implemented". That is still true of the *pipeline*; Phase 2 adds vision
+classification and caption embeddings. Matching and the mismatch guard remain
+Phase 3 and were not started.
+
+## 16. Phase 2 scope, from the gate rather than from enthusiasm
+
+The gate in `phases/PHASE-2-VISION-PIPELINE.md` requires every corpus image to
+have an analysis record, plus cost visibility and evidence. Reading it before
+writing code kept the build to schema-validated classification, a resumable job
+queue, per-call cost tracking, and caption embeddings.
+
+Not built, deliberately: no HTTP routes for images/jobs/costs. The gate asks for
+cost visibility, and `npm run costs` plus `image_metadata` provide it. Routes are
+in `capstone.yaml` under `endpoints_planned` and remain a later phase.
+
+## 17. Three real bugs the first end-to-end run exposed
+
+These are the ones worth remembering, because all three passed a green unit
+suite and only failed against real data.
+
+**`costTracker.trackCall()` returned `undefined`.** It recorded the audit row and
+returned nothing, so every caller received `undefined` instead of the provider's
+response — and the vision path read `rawResponse.candidates`, producing
+`TypeError: Cannot destructure property 'rawOutput' of 'undefined'`. The unit
+tests passed because they asserted on the returned *row*, never on the
+pass-through. Fixed by returning the provider response unchanged.
+
+**A zero embedding was accepted.** The embedding provider normalised a vector and
+the schema checked its length, but a literal `0` from a malformed response became
+a valid-looking 768-element all-zero vector. A zero vector is worse than a
+rejected call: it produces a plausible similarity score for an image that was
+never described. Now rejected explicitly.
+
+**The retry path left images stuck in `PROCESSING`.** A job that exhausted its
+attempts failed, but the image row was never moved out of `PROCESSING`, so those
+images looked in-progress forever and could never be retried.
+
+## 18. The quota margin bug — `1_1` is eleven
+
+The most instructive mistake in the phase, and it was caught before it shipped.
+
+`classifyQuota()` adds headroom to a provider-stated retry window so the next
+attempt does not land exactly on the boundary. Written as:
+
+```js
+const withMargin = retryAfterSeconds * 1_1;   // meant 1.1
+```
+
+`1_1` is numeric-separator syntax for **11**, not a decimal point. An 11x margin
+turned the measured 31-second per-minute window into 5m40s — comfortably past the
+two-minute threshold, so the runner classified it as a *daily* limit and parked
+the job instead of waiting it out. The failure mode was invisible in the sense
+that the code looked correct, the tests I had written to my own wrong assumption
+passed, and the symptom ("corpus needs four manual runs") would have been easy to
+blame on the free tier.
+
+Two changes followed, both about not trusting the reading:
+
+- Replaced the literal with a named `QUOTA_MARGIN = 1.1` and a comment recording
+  why the inline form was a trap.
+- Added a test asserting the *threshold* rather than a literal: a real
+  `limit: 5 / retry in 30.9s` body must classify as wait, not park. A test that
+  pins an exact millisecond count only proves the arithmetic still matches my
+  assumptions; one that pins the decision checks the behaviour that matters.
+
+## 19. The destructive test suite
+
+`npm run test:all` wiped the cost audit trail.
+
+`tests/integration/pipeline.test.js` ran `DELETE FROM jobs` and
+`DELETE FROM ai_calls` with no `WHERE` clause, directly above a comment claiming
+"only rows this suite's own fixtures create are removed". The suite runs against
+the same database as the real corpus, so running the tests deleted every
+`ai_calls` row describing real provider spend — while `image_metadata` survived,
+leaving 57 real analyses with no record of what they cost or which calls failed.
+
+This was only noticed because it was checked for. The failure mode is severe and
+silent: a green test run that destroys the evidence it sits next to.
+
+Fixed by scoping cleanup to this suite's own fixtures — `provider LIKE 'stub%'`,
+`type LIKE 'test.%'`, and fixture images by `storage_key` prefix — and verified
+with a sentinel row:
+
+```
+INSERT ... ('sentinel','real-run',...)   -- $1.25 audit row
+npm run test:all                         -- 184 pass, 0 fail
+SELECT ... WHERE provider='sentinel'     -- still present
+```
+
+Worth stating plainly: the real cost rows are gone and cannot be reconstructed
+without spending more quota. The per-run figures captured at the time are
+recorded in `EVIDENCE.md` from the run logs.
+
+The ordering is also load-bearing — jobs are identified partly through a join on
+`ai_calls`, so `ai_calls` must be deleted last. My first version had it backwards
+and deleted the rows it was about to join on; the sentinel test is what exposed
+that ordering, not code review.
+
+## 20. Re-analysis guard
+
+The vision idempotency key contains the model. Switching models therefore
+re-queues *every* image: to cover the last 4 images with a second model would
+have re-derived the 48 already done, spending quota to reproduce captions that
+already existed.
+
+`enqueueVisionJob()` now skips images holding a `VALID` or `LOW_CONFIDENCE`
+analysis. Scoped to *validated* rows deliberately — an image whose only analysis
+is `INVALID`, or which has none, is exactly what a resumed run must pick up.
+
+## 21. Model availability, and what it cost the gate
+
+Detailed in `docs/adr/004-vision-model-availability.md`. In short: the free tier
+allows roughly 20 `generateContent` calls per model per day, so 61 images cannot
+be analysed on one model in one day. Run-level consistency is the default;
+`--model-pool` is the explicit opt-in that trades it for completion in a day.
+
+Result: **57 of 61 images analysed**, across four models, all `VALID`, mean
+confidence 0.9796, minimum 0.95. The remaining 4 are `dog` images parked against
+exhausted daily caps.
+
+**The Phase 2 gate is not met and this section is the reason.** It requires all
+61. Two models in the provider list are also unusable to this account
+(`gemini-2.5-flash-lite` closed to new users; `gemini-flash-lite-latest` returns
+HTTP 400 on `generateContent`), which is why `--model-pool` had to be given
+explicit candidates rather than a filtered list.
+
+Not claimed: the corpus is not complete, and Phase 4's precision measurement will
+be multi-model unless the corpus is re-derived.
+
+## 22. Verification
+
+`npm run test:all` — 184 pass, 0 fail. `make check` (migrations + full suite +
+corpus verify) passes; the 16 provenance warnings are the Phase 1 known state of
+the unverified subset, not new.
+
+Live, with real provider calls: 57 analyses, 57 embeddings, real 503s retried
+successfully, real quota walls detected and parked without consuming attempts.

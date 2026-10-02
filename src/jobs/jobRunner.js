@@ -132,6 +132,26 @@ export async function runOnce({ type, signal } = {}) {
     // handed back and the job is parked for the window the API itself stated.
     if (error?.quota === true) {
       const delayMs = error.retryAfterMs ?? QUOTA_FALLBACK_DELAY_MS;
+
+      // Short window: the quota is per-minute and will clear shortly, so the
+      // job is returned to the queue and the run waits it out. Parking the work
+      // for 31 seconds would mean an operator had to re-run the corpus to
+      // finish it.
+      if (delayMs <= MAX_QUOTA_WAIT_MS) {
+        const released = await jobsRepository.releaseJob(job.id, { error: message });
+
+        logger.info('Provider rate limit hit; waiting for the window to clear', {
+          jobId: job.id,
+          type: job.type,
+          model: error.model,
+          waitMs: delayMs,
+        });
+
+        return { outcome: 'wait', job: released, error, delayMs };
+      }
+
+      // Long window: the quota is daily. Park the work and let the run end,
+      // because every remaining job would hit the same wall.
       const deferred = await jobsRepository.deferJob(job.id, { error: message, delayMs });
 
       logger.warn('Provider quota exhausted; deferring job', {
@@ -207,6 +227,7 @@ export async function runUntilEmpty({
     retried: 0,
     failed: 0,
     deferred: 0,
+    waited: 0,
     hitJobCap: false,
     stoppedByBudget: false,
     stoppedByQuota: false,
@@ -236,7 +257,7 @@ export async function runUntilEmpty({
       }
     }
 
-    const { outcome, job, error } = await runOnce({ type, signal });
+    const { outcome, job, error, delayMs } = await runOnce({ type, signal });
 
     if (outcome === 'idle') {
       break;
@@ -254,6 +275,13 @@ export async function runUntilEmpty({
       summary.quotaError = error;
       onProgress?.({ event: 'deferred', job, error, delayMs });
       break;
+    } else if (outcome === 'wait') {
+      // The quota window is short enough to sit through. Counted as its own
+      // outcome so the summary shows rate limiting separately from genuine
+      // retries, which matter for different reasons.
+      summary.waited += 1;
+      onProgress?.({ event: 'wait', job, error, delayMs });
+      await sleep(delayMs);
     } else if (outcome === 'retry') {
       summary.retried += 1;
       const delay = backoffDelayMs(job.attempts);
@@ -278,6 +306,22 @@ export async function runUntilEmpty({
  * 183 pointless requests.
  */
 const QUOTA_FALLBACK_DELAY_MS = 60 * 60 * 1000;
+
+/**
+ * Longest quota window a single run will sit through before parking the work.
+ *
+ * Two genuinely different limits hide behind the same HTTP 429, and conflating
+ * them is expensive in opposite directions:
+ *
+ *   gemini-3.6-flash -> "limit: 5, retry in 30.9s"   a per-minute limit
+ *   gemini-3.5-flash -> "limit: 20, retry in 2h49m"  a daily limit
+ *
+ * Waiting 31 seconds finishes the corpus. Waiting 2h49m inside a batch script
+ * would hold a database connection and a terminal for hours, so that case parks
+ * the job and exits instead. Two minutes separates the two cleanly for the
+ * limits actually observed.
+ */
+const MAX_QUOTA_WAIT_MS = 2 * 60 * 1000;
 
 function describeJobFailure(error) {
   if (error instanceof Error) {

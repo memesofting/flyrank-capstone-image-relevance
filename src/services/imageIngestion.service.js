@@ -80,6 +80,7 @@ export async function ingestCorpus({
     reused: 0,
     rejected: 0,
     enqueued: 0,
+    alreadyAnalysed: 0,
     problems: [],
   };
 
@@ -209,6 +210,23 @@ export async function ingestCorpus({
  */
 async function enqueueVisionJob({ image, model, modelVersion, promptVersion, summary }) {
   if (!model) {
+    return;
+  }
+
+  // Do not re-analyse an image that already has a usable analysis.
+  //
+  // The idempotency key contains the model, so changing model would otherwise
+  // re-queue all 61 images and spend the whole quota re-deriving captions that
+  // already exist — observed directly: switching to a second model to cover the
+  // last 13 images would have re-analysed the 48 already done.
+  //
+  // Deliberately scoped to a *validated* analysis. An image whose only
+  // analysis is INVALID, or which has none at all, still gets queued: those are
+  // exactly the images a resumed run needs to finish.
+  const hasUsableAnalysis = await imagesRepository.hasValidatedMetadata(image.id);
+
+  if (hasUsableAnalysis && !summary.reanalyse) {
+    summary.alreadyAnalysed += 1;
     return;
   }
 

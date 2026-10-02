@@ -34,6 +34,16 @@ const TRANSIENT_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 const PERMANENT_STATUSES = new Set([400, 401, 403, 404, 413, 422]);
 
 /**
+ * Extra headroom added to a provider-stated quota window.
+ *
+ * Written as a named constant rather than inline because `1_1` looks like a
+ * decimal and is not: in JavaScript `1_1` is 11, and an 11x margin silently
+ * turned the 31-second per-minute window into 5m40s — long enough to be
+ * classified as a daily limit and park the job instead of waiting it out.
+ */
+const QUOTA_MARGIN = 1.1;
+
+/**
  * Detect a free-tier QUOTA exhaustion, as distinct from ordinary rate limiting.
  *
  * Measured during Phase 2: the free tier allows 20 `generateContent` requests
@@ -78,11 +88,20 @@ export function classifyQuota(message, status) {
     + (Number(minutes ?? 0) * 60)
     + Number(seconds ?? 0);
 
-  // Floor of one minute, applied AFTER converting to milliseconds. An earlier
-  // version compared seconds against 60 and only then multiplied, so a provider
-  // asking for "retry in 45s" was rounded UP to 60s — the guard silently made
-  // every short window longer than the provider requested.
-  return { quota: true, retryAfterMs: Math.max(Math.round(retryAfterSeconds * 1000), 60_000) };
+  // Floor of 5 seconds, applied AFTER converting to milliseconds, plus a 10%
+  // margin so the next request does not land exactly on the boundary and earn
+  // another rejection.
+  //
+  // An earlier version floored to a full minute, which was wrong in both
+  // directions: it rounded a provider's 31-second window up to 60s (the guard
+  // silently lengthening every short window), and it made a short RPM limit
+  // indistinguishable from a daily one. Measured on this project:
+  // gemini-3.6-flash reports "limit: 5, retry in 30.9s" — a per-minute limit,
+  // perfectly rideable — while gemini-3.5-flash reports "limit: 20, retry in
+  // 2h49m" — a daily limit that must end the run. Deciding between those is
+  // jobRunner's job, and it needs the real number to do it.
+  const withMargin = retryAfterSeconds * QUOTA_MARGIN;
+  return { quota: true, retryAfterMs: Math.max(Math.round(withMargin * 1000), 5_000) };
 }
 
 /**
@@ -240,29 +259,16 @@ export async function callGemini({
     });
   }
 
-  // A 200 can still carry an error block, and a candidate list can come back
-  // empty when the request was blocked. Both would otherwise surface as an
-  // unhelpful "cannot read properties of undefined" further downstream.
-  const blockReason = payload?.promptFeedback?.blockReason;
-  if (blockReason) {
-    throw new ProviderError(`Gemini blocked the request: ${blockReason}`, {
-      provider: 'gemini',
-      model,
-      status: response.status,
-      transient: false,
-      body: payload.promptFeedback,
-    });
-  }
-
-  if (!Array.isArray(payload?.candidates) || payload.candidates.length === 0) {
-    throw new ProviderError(`Gemini returned no candidates from ${model}:${method}`, {
-      provider: 'gemini',
-      model,
-      status: response.status,
-      transient: true,
-      body: payload,
-    });
-  }
+  // Nothing beyond HTTP is checked here. Response-shape validation belongs to
+  // the provider that asked for that shape, because the shapes are not
+  // interchangeable: generateContent returns { candidates: [...] }, while
+  // embedContent returns { embedding: { values: [...] } } and has no candidates
+  // at all.
+  //
+  // An earlier version asserted `candidates` here for every call. It worked for
+  // vision, and for embeddings it rejected every HTTP 200 response as "returned
+  // no candidates" — so all 61 caption embeddings failed while the provider was
+  // demonstrably succeeding. Only the caller knows what it requested.
 
   return { data: payload, usage: payload.usageMetadata ?? null };
 }

@@ -246,3 +246,68 @@ interface EmbeddingProvider {
 Provider adapters convert external responses into internal representations.
 
 The rest of the application must not depend on Gemini-specific response shapes.
+
+---
+
+## Model availability and resuming a paused corpus
+
+The free tier allows roughly **20 `generateContent` calls per model per day**, so
+a 61-image corpus cannot be analysed on one model in one day. Full measurements
+and reasoning are in `docs/adr/004-vision-model-availability.md`.
+
+Two different limits produce near-identical error bodies:
+
+| Window | Meaning | What the runner does |
+|---|---|---|
+| under 2 minutes | per-minute rate limit | sleeps, then continues in the same run |
+| 2 minutes or more | daily quota | parks the job with `reclaimable_at`, exits cleanly |
+
+Neither consumes a retry attempt. A rate limit is not a failure, and a job that
+burned its budget on one would be `FAILED` for no useful reason.
+
+### Finishing a paused corpus
+
+Nothing special is required — the corpus is resumable. Jobs that were parked
+become claimable once their window passes, and ingestion skips images that
+already hold a valid analysis, so a second run finishes only what is left:
+
+```bash
+npm run process:corpus                      # resume, using configured models
+npm run process:corpus -- --limit=10       # just the next 10
+npm run process:corpus -- --no-ingest      # drain queued jobs, no corpus scan
+npm run costs                               # per-model spend and call counts
+```
+
+### Model selection
+
+The default is run-level consistency: if a run has already written analysis rows
+it will not switch models, because a corpus whose captions came from several
+models cannot be compared.
+
+When the daily cap makes completion in one day more important than consistency,
+`--model-pool` does it explicitly:
+
+```bash
+npm run process:corpus -- --model-pool=gemini-3.1-flash-lite,gemini-3.7-flash
+```
+
+Every `image_metadata` row records the model that produced it, so a pooled corpus
+stays attributable. Phase 4 must then state that its precision figure is pooled.
+
+Two models in the provider list do not work on a new free-tier account and should
+not be added to a pool: `gemini-2.5-flash-lite` is closed to new users, and
+`gemini-flash-lite-latest` returns HTTP 400 on `generateContent`.
+
+### Cost reporting
+
+```bash
+npm run costs              # today, and the last 30 days
+```
+
+Totals come from `ai_calls`, which records provider, model, operation, token
+counts, estimated cost, status, and error for every attempt. A rejected call is
+still recorded — that is usually where the cost story is.
+
+> **Careful when running tests.** The integration suite shares this database. Its
+> cleanup is scoped to its own stub-provider fixtures; an earlier version ran
+> unscoped `DELETE FROM ai_calls` and silently deleted the real cost audit trail.

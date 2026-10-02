@@ -207,6 +207,25 @@ export async function insertImageMetadata({
  * this model" is what keeps a stored vector traceable to the analysis it came
  * from once more than one prompt version or model exists.
  */
+/**
+ * Whether an image already carries a usable, schema-validated analysis.
+ *
+ * Guards re-analysis on resume. The vision idempotency key includes the model,
+ * so without this check a run using a different model would re-queue and
+ * re-derive every image that already had a caption.
+ */
+export async function hasValidatedMetadata(imageId) {
+  const { rows } = await query(
+    `SELECT EXISTS (
+       SELECT 1 FROM image_metadata
+       WHERE image_id = $1 AND validation_status IN ('VALID', 'LOW_CONFIDENCE')
+     ) AS present`,
+    [imageId],
+  );
+
+  return rows[0]?.present === true;
+}
+
 export async function findImageMetadataById(metadataId) {
   const { rows } = await query(
     `SELECT ${METADATA_COLUMNS} FROM image_metadata WHERE id = $1`,

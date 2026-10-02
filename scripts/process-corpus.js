@@ -17,6 +17,7 @@
  *   --reset          delete existing jobs first, so a run starts from zero
  *   --max-jobs=N     stop after N job executions (default 500)
  *   --model=NAME     override the vision model for this run
+ *   --no-fallback    fail rather than trying the fallback model
  *
  * Exit codes:
  *   0  every queued job completed (or nothing was left to do)
@@ -52,6 +53,8 @@ function parseArgs(argv) {
     reset: false,
     maxJobs: 500,
     model: null,
+    noFallback: false,
+    modelPool: [],
   };
 
   for (const raw of argv) {
@@ -78,6 +81,15 @@ function parseArgs(argv) {
         break;
       case '--reset':
         args.reset = true;
+        break;
+      case '--no-fallback':
+        args.noFallback = true;
+        break;
+      case '--model-pool':
+        args.modelPool = String(value ?? '')
+          .split(',')
+          .map((name) => name.trim())
+          .filter(Boolean);
         break;
       default:
         throw new UsageError(`unknown flag: ${raw}`);
@@ -128,14 +140,45 @@ async function main() {
   }
 
   // --- providers -----------------------------------------------------------
-  const { provider: visionProvider, primaryModel, fallbackModel } = createVisionProvider({
+  const { provider: firstVisionProvider, primaryModel, fallbackModel } = createVisionProvider({
     model: args.model,
   });
+
+  // Run-level model resolution.
+  //
+  // The free tier allows 20 generateContent requests per MODEL per day, and
+  // gemini-3.8-flash is already exhausted, so the primary cannot always run.
+  // A batch must not silently mix models, though: image_metadata is keyed per
+  // model, so a half-3.8 / half-3.5 corpus looks like two separate corpora to
+  // Phase 4's precision measurement, and nothing in the rows says which run
+  // produced which.
+  //
+  // So the run commits to one model. Candidates are tried in order, and the
+  // next is only used when the previous produced nothing at all — a single
+  // quota wall costs one request, not the whole budget. If some images were
+  // already analysed, the run stops rather than mixing.
+  // An explicit pool. The free tier allows roughly 20 generateContent requests
+  // per model per day, so 61 images cannot be analysed on one model in one day —
+  // this is a hard external limit, not a configuration choice. --model-pool
+  // walks a list of models, using each until its quota runs out, and every
+  // image_metadata row records which model produced it.
+  //
+  // The trade-off is real and deliberate: captions then come from more than one
+  // model, so Phase 4's precision figure is not a single-model measurement. It
+  // is opt-in and never the default, because run-level consistency is the better
+  // default and the pool is the tool for when the quota makes that impossible.
+  const candidateModels = args.modelPool?.length
+    ? args.modelPool
+    : args.noFallback
+      ? [primaryModel]
+      : [primaryModel, fallbackModel].filter(Boolean);
+
   const { provider: embeddingProvider, model: embeddingModel } = createEmbeddingProvider();
 
-  say(`vision model     : ${visionProvider.name}/${visionProvider.model}`);
-  if (fallbackModel) {
-    say(`vision fallback  : ${fallbackModel} (used only if the primary is unavailable)`);
+  let visionProvider = firstVisionProvider;
+  say(`vision model     : ${candidateModels.join(' then ')}`);
+  if (candidateModels.length > 1) {
+    say(`                   (resolved once per run; a batch never mixes models)`);
   }
   say(`embedding model  : ${embeddingProvider.name}/${embeddingModel}`);
   say(`prompt version   : ${PROMPT_VERSION}`);
@@ -193,6 +236,7 @@ async function main() {
     say(`new image rows        : ${summary.inserted}`);
     say(`reused existing rows  : ${summary.reused}`);
     say(`vision jobs enqueued  : ${summary.enqueued}`);
+    say(`already analysed       : ${summary.alreadyAnalysed} (skipped, not re-derived)`);
 
     if (summary.rejected > 0) {
       say(`REJECTED              : ${summary.rejected}`);
@@ -216,35 +260,76 @@ async function main() {
   // --- run -----------------------------------------------------------------
   let quotaStopped = false;
 
-  const totals = { completed: 0, retried: 0, failed: 0, deferred: 0 };
+  const totals = { completed: 0, retried: 0, failed: 0, deferred: 0, waited: 0 };
 
   if (args.stage === 'vision' || args.stage === 'all') {
     heading('Vision analysis');
-    say('[vision] starting. Each line is one image; image= is the manifest id.');
 
-    const summary = await runUntilEmpty({
-      type: VISION_OPERATION,
-      maxJobs: args.maxJobs,
-      checkBudget: () => checkBudget(),
-      onProgress: (info) => {
-        if (info.event === 'retry') {
-          say(`[vision] job=${info.job.id} status=retry attempt=${info.job.attempts} in ${info.delayMs}ms`);
-        } else if (info.event === 'deferred') {
-          say(`[vision] job=${info.job.id} status=deferred wait=${formatDuration(info.delayMs)}`);
-        } else if (info.event === 'failed') {
-          say(`[vision] job=${info.job.id} status=failed error=${info.error?.message ?? info.error}`);
-        }
-      },
-    });
+    for (const [index, model] of candidateModels.entries()) {
+      if (index > 0) {
+        say();
+        say(`switching to fallback model: ${model}`);
+      } else {
+        say(`[vision] starting with ${visionProvider.name}/${model}`);
+      }
 
-    totals.completed += summary.completed;
-    totals.retried += summary.retried;
-    totals.failed += summary.failed;
-    totals.deferred += summary.deferred;
-    say(`[vision] completed=${summary.completed} retried=${summary.retried} deferred=${summary.deferred} failed=${summary.failed}`);
+      // Re-register so the handler is bound to the model this run committed to.
+      // The handler passes visionProvider.model into analyseImage, which is what
+      // lands in image_metadata.model and into the job idempotency key.
+      if (index > 0) {
+        visionProvider = createVisionProvider({ model }).provider;
+        registerPhase2Handlers({ visionProvider, embeddingProvider });
+      }
 
-    if (summary.stoppedByQuota) {
+      const summary = await runUntilEmpty({
+        type: VISION_OPERATION,
+        maxJobs: args.maxJobs,
+        checkBudget: () => checkBudget(),
+        onProgress: (info) => {
+          if (info.event === 'retry') {
+            say(`[vision] job=${info.job.id} status=retry attempt=${info.job.attempts} in ${info.delayMs}ms`);
+          } else if (info.event === 'wait') {
+            say(`[vision] rate limited; waiting ${formatDuration(info.delayMs)}`);
+          } else if (info.event === 'deferred') {
+            say(`[vision] job=${info.job.id} status=deferred wait=${formatDuration(info.delayMs)}`);
+          } else if (info.event === 'failed') {
+            say(`[vision] job=${info.job.id} status=failed error=${info.error?.message ?? info.error}`);
+          }
+        },
+      });
+
+      totals.completed += summary.completed;
+      totals.retried += summary.retried;
+      totals.failed += summary.failed;
+      totals.deferred += summary.deferred;
+      totals.waited += summary.waited;
+      say(`[vision] completed=${summary.completed} retried=${summary.retried} rate-limited=${summary.waited} deferred=${summary.deferred} failed=${summary.failed}`);
+
+      if (!summary.stoppedByQuota) {
+        break;
+      }
+
       quotaStopped = true;
+
+      if (index === candidateModels.length - 1) {
+        break;
+      }
+
+      // In pool mode a quota wall is the expected reason to move on, even after
+      // successful work: the next model has its own daily allowance. Every row
+      // records the model that produced it, so the corpus stays attributable.
+      if (args.modelPool.length === 0) {
+        // Default behaviour: refuse to mix models within one corpus without an
+        // explicit --model-pool.
+        if (summary.completed > 0 || summary.failed > 0) {
+          say();
+          say('not switching models mid-corpus: this run already wrote analysis rows.');
+          say('Re-run later, when the quota window has reset, to continue with the');
+          say('fallback. Unstarted images remain PENDING.');
+          say('Use --model-pool=a,b to deliberately span several models instead.');
+          break;
+        }
+      }
     }
   }
 
@@ -323,7 +408,7 @@ async function main() {
   }
 
   say();
-  say(`totals: completed=${totals.completed} retried=${totals.retried} deferred=${totals.deferred} failed=${totals.failed}`);
+  say(`totals: completed=${totals.completed} retried=${totals.retried} rate-limited=${totals.waited} deferred=${totals.deferred} failed=${totals.failed}`);
 
   if (quotaStopped) {
     say();
@@ -354,6 +439,7 @@ main()
     if (error instanceof UsageError) {
       process.stderr.write('\nUsage: npm run process:corpus -- [--limit=N] [--stage=vision|embed|all]\n');
       process.stderr.write('       [--dry-run] [--no-ingest] [--reset] [--max-jobs=N] [--model=NAME]\n');
+      process.stderr.write('       [--no-fallback]\n');
     }
     await closePool().catch(() => {});
     process.exit(error instanceof UsageError ? 2 : 1);
