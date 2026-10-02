@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/memesofting/flyrank-capstone-image-relevance/dataset/manifest.schema.json",
+  "title": "Capstone image corpus manifest",
+  "description": "Provenance, licensing, and curated category for every image in the capstone corpus. `category` is human curation ground truth recorded from each image's own source photo-page description; it is never derived from a filename.",
+  "type": "object",
+  "required": ["version", "description", "categories", "target", "images"],
+  "properties": {
+    "version": { "type": "integer", "minimum": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "categories": {
+      "type": "array",
+      "minItems": 4,
+      "items": { "$ref": "#/definitions/category" }
+    },
+    "target": {
+      "type": "object",
+      "required": ["minImages", "minCategories"],
+      "properties": {
+        "minImages": { "type": "integer", "minimum": 1 },
+        "minCategories": { "type": "integer", "minimum": 4 }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "verified": { "type": "integer", "minimum": 0 },
+        "unverified": { "type": "integer", "minimum": 0 },
+        "byCategory": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "images": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/imageEntry" }
+    }
+  },
+  "definitions": {
+    "category": {
+      "type": "string",
+      "enum": ["fox", "wolf", "dog", "bear", "deer", "other", "unverified"]
+    },
+    "imageEntry": {
+      "type": "object",
+      "required": ["id", "image", "category", "categorySource", "source", "license", "provenance", "sha256", "width", "height", "byteSize"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+        "image": { "type": "string", "pattern": "^(images|unverified)/" },
+        "category": { "$ref": "#/definitions/category" },
+        "categorySource": { "type": "string", "minLength": 1 },
+        "sourceDescription": { "type": ["string", "null"] },
+        "source": { "type": "string", "minLength": 1 },
+        "sourcePage": { "type": ["string", "null"], "format": "uri" },
+        "sourceUrl": { "type": ["string", "null"], "format": "uri" },
+        "photographer": { "type": ["string", "null"] },
+        "license": { "type": "string", "minLength": 1 },
+        "licenseUrl": { "type": ["string", "null"], "format": "uri" },
+        "provenance": { "type": "string", "enum": ["verified", "unverified"] },
+        "note": { "type": "string" },
+        "fetchedBy": { "type": "string" },
+        "sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "width": { "type": ["integer", "null"], "minimum": 1 },
+        "height": { "type": ["integer", "null"], "minimum": 1 },
+        "byteSize": { "type": ["integer", "null"], "minimum": 1 },
+        "unsplashId": { "type": "string" }
+      }
+    }
+  }
+}
