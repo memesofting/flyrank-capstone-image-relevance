@@ -55,10 +55,17 @@ describe('database is migrated', () => {
     const { rows } = await query('SELECT name FROM schema_migrations ORDER BY name');
     const names = rows.map((row) => row.name);
 
+    // Listed exhaustively rather than by count, so a migration cannot be added
+    // without this test naming it. A count-only assertion would keep passing
+    // while a new table nobody asserted appeared.
     assert.deepEqual(names, [
       '001_extensions_and_core.sql',
       '002_embeddings_and_suggestions.sql',
       '003_jobs_cost_and_eval.sql',
+      '004_provenance_and_prompt_version.sql',
+      '005_job_queue.sql',
+      '006_embedding_provenance.sql',
+      '007_job_payload.sql',
     ]);
   });
 
@@ -197,7 +204,9 @@ describe('database is migrated', () => {
 
     // These are the rules that stop a retrying job creating duplicate records.
     const expected = {
-      uq_image_metadata_model: '(image_id, model, model_version)',
+      // Includes prompt_version (migration 004): a revised prompt is a
+      // different analysis and must be able to coexist with the earlier one.
+      uq_image_metadata_model: '(image_id, model, model_version, prompt_version)',
       uq_image_embedding_model: '(image_id, model, model_version)',
       uq_post_embedding_model: '(post_id, model, model_version)',
       uq_reviews_suggestion: '(suggestion_id)',

@@ -56,8 +56,12 @@ export function estimateCostUsd(model, usage) {
     return 0;
   }
 
-  const inputTokens = Number(usage?.inputTokens ?? 0) || 0;
-  const outputTokens = Number(usage?.outputTokens ?? 0) || 0;
+  // Clamped at zero. A provider that reports a negative count — or a NaN that
+  // `|| 0` does not catch, since NaN is falsy but -0 is not — must not subtract
+  // from tracked spend, because the budget guard reads this column to decide
+  // whether work may continue.
+  const inputTokens = Math.max(0, Number(usage?.inputTokens ?? 0) || 0);
+  const outputTokens = Math.max(0, Number(usage?.outputTokens ?? 0) || 0);
 
   const cost =
     (inputTokens / 1_000_000) * rates.inputPerMillionUsd

@@ -33,6 +33,10 @@ import { ProviderError, callGemini } from './geminiHttp.js';
  * @returns {number[]}
  */
 export function l2Normalize(vector) {
+  if (!Array.isArray(vector) || vector.length === 0) {
+    throw new Error('cannot normalise an empty embedding vector');
+  }
+
   let sumOfSquares = 0;
   for (const value of vector) {
     sumOfSquares += value * value;
@@ -40,7 +44,11 @@ export function l2Normalize(vector) {
 
   const norm = Math.sqrt(sumOfSquares);
   if (norm === 0) {
-    return vector;
+    // Returning the zero vector unchanged is the silent failure this guards
+    // against: it satisfies every length check, reaches pgvector, and then
+    // matches nothing under cosine similarity forever. Failing here keeps the
+    // problem attached to the provider response that caused it.
+    throw new Error('cannot normalise a zero embedding vector: the provider returned no signal');
   }
 
   return vector.map((value) => value / norm);

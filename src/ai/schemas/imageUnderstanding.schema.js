@@ -43,8 +43,22 @@ export const imageUnderstandingSchema = z
     subject: z
       .string()
       .trim()
+      // The controlled vocabulary is enforced in three places — this prompt,
+      // Gemini's responseSchema enum, and here — because each can fail
+      // independently. The prompt is advisory and the wire enum only binds
+      // providers that honour responseSchema (Ollama does not). This is the
+      // trust boundary, so it is the one that has to be authoritative: with the
+      // enum absent here, classifyVisionOutput({ subject: 'dragon', ... })
+      // returned VALID, and the Ollama path would persist a made-up subject as a
+      // trusted classification. Derived from SUBJECT_VOCABULARY so the three
+      // copies cannot drift apart.
       .min(1, 'subject must not be empty')
-      .max(120, 'subject must be 120 characters or fewer'),
+      .refine(
+        (value) => SUBJECT_VOCABULARY.includes(value),
+        {
+          message: `subject must be one of: ${SUBJECT_VOCABULARY.join(', ')}`,
+        },
+      ),
 
     category: z
       .string()

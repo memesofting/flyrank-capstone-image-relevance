@@ -74,13 +74,15 @@ export function classifyQuota(message, status) {
   }
 
   const [, hours, minutes, seconds] = match;
-  const retryAfterMs = (Number(hours ?? 0) * 3600)
+  const retryAfterSeconds = (Number(hours ?? 0) * 3600)
     + (Number(minutes ?? 0) * 60)
     + Number(seconds ?? 0);
 
-  // Guard the floor: a provider that says "retry in 0s" must not produce a tight
-  // retry loop.
-  return { quota: true, retryAfterMs: Math.max(retryAfterMs, 60) * 1000 };
+  // Floor of one minute, applied AFTER converting to milliseconds. An earlier
+  // version compared seconds against 60 and only then multiplied, so a provider
+  // asking for "retry in 45s" was rounded UP to 60s — the guard silently made
+  // every short window longer than the provider requested.
+  return { quota: true, retryAfterMs: Math.max(Math.round(retryAfterSeconds * 1000), 60_000) };
 }
 
 /**
