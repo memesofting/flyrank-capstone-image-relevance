@@ -199,6 +199,23 @@ export async function insertImageMetadata({
   return { ...row, created };
 }
 
+/**
+ * Fetch one image_metadata row by its own id.
+ *
+ * Used by the embedding path, where the job records exactly which analysis it
+ * intends to embed. Looking the row up by id rather than by "most recent for
+ * this model" is what keeps a stored vector traceable to the analysis it came
+ * from once more than one prompt version or model exists.
+ */
+export async function findImageMetadataById(metadataId) {
+  const { rows } = await query(
+    `SELECT ${METADATA_COLUMNS} FROM image_metadata WHERE id = $1`,
+    [metadataId],
+  );
+
+  return rows[0] ?? null;
+}
+
 export async function findImageMetadata(imageId, { model, modelVersion, promptVersion } = {}) {
   const { rows } = await query(
     `SELECT ${METADATA_COLUMNS} FROM image_metadata

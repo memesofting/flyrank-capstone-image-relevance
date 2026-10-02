@@ -23,7 +23,7 @@
 import { query } from '../db/pool.js';
 
 const COLUMNS = `id, type, entity_type, entity_id, status, attempts, max_attempts,
-  progress, last_error, idempotency_key, reclaimable_at, last_attempt_at,
+  progress, last_error, idempotency_key, payload, reclaimable_at, last_attempt_at,
   started_at, completed_at, created_at`;
 
 /**
@@ -69,14 +69,15 @@ export async function enqueueJob({
   idempotencyKey,
   maxAttempts = 3,
   progress = 0,
+  payload = {},
 }) {
   const { rows } = await query(
-    `INSERT INTO jobs (type, entity_type, entity_id, idempotency_key, max_attempts, progress)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO jobs (type, entity_type, entity_id, idempotency_key, max_attempts, progress, payload)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
      ON CONFLICT (idempotency_key) DO UPDATE
        SET idempotency_key = EXCLUDED.idempotency_key
      RETURNING ${COLUMNS}, (xmax = 0) AS created`,
-    [type, entityType, entityId, idempotencyKey, maxAttempts, progress],
+    [type, entityType, entityId, idempotencyKey, maxAttempts, progress, JSON.stringify(payload)],
   );
 
   const row = rows[0];
@@ -110,16 +111,24 @@ export async function claimNextJob({ type } = {}) {
        reclaimable_at = NOW() + ($1 || ' seconds')::interval,
        last_error    = NULL,
        progress      = 0
-     WHERE id = (
-       SELECT id FROM jobs
-       WHERE status = 'PENDING'
-         AND ($2::text IS NULL OR type = $2)
-         AND (reclaimable_at IS NULL OR reclaimable_at <= NOW())
-       ORDER BY created_at ASC, id ASC
-       FOR UPDATE SKIP LOCKED
-       LIMIT 1
-     )
-     RETURNING ${COLUMNS}`,
+      WHERE id = (
+        SELECT id FROM jobs
+        WHERE (
+          status = 'PENDING'
+          -- Recovery, not just dispatch: a worker killed mid-job leaves the row
+          -- in PROCESSING, and since that row is the only record that the work
+          -- was ever started, ignoring it would strand the job permanently.
+          -- reclaimable_at was set when the claim began, so its expiry is the
+          -- signal that the previous worker is gone.
+          OR (status = 'PROCESSING' AND reclaimable_at <= NOW())
+        )
+          AND ($2::text IS NULL OR type = $2)
+          AND (reclaimable_at IS NULL OR reclaimable_at <= NOW())
+        ORDER BY created_at ASC, id ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+      )
+      RETURNING ${COLUMNS}`,
     [String(90), type ?? null],
   );
 
@@ -171,6 +180,44 @@ export async function failJobAttempt(id, { error, willRetry, progress = 0 }) {
      WHERE id = $1
      RETURNING ${COLUMNS}`,
     [id, willRetry, error, progress],
+  );
+
+  return rows[0] ? stripInternalColumns(rows[0]) : null;
+}
+
+/**
+ * Park a job for later without consuming an attempt.
+ *
+ * This is the quota-exhaustion path, and it is deliberately NOT failJobAttempt.
+ * The free tier answers with "Please retry in 3h14m13s"; retrying in 2s cannot
+ * succeed and spends the attempt budget doing nothing. So the job returns to
+ * PENDING, the attempt it was claimed under is handed back, and a future
+ * reclaimable_at parks it until the provider says the window has passed.
+ *
+ * `attempts - 1` is the important part: a job blocked by a provider quota limit
+ * has not made a mistake, and letting it exhaust max_attempts would permanently
+ * fail an image that was never actually analysed. GREATEST guards the floor
+ * because a deferred job must not end up with a negative attempt count.
+ *
+ * @param {string} id
+ * @param {object} options
+ * @param {string} options.error reason, persisted for the operator
+ * @param {number} options.delayMs how long to wait before this job is claimable
+ * @returns {Promise<object | null>}
+ */
+export async function deferJob(id, { error, delayMs }) {
+  const { rows } = await query(
+    `UPDATE jobs SET
+       status         = 'PENDING',
+       last_error     = $2,
+       progress       = 0,
+       started_at     = NULL,
+       completed_at   = NULL,
+       attempts       = GREATEST(attempts - 1, 0),
+       reclaimable_at = NOW() + ($3 || ' milliseconds')::interval
+      WHERE id = $1
+      RETURNING ${COLUMNS}`,
+    [id, error, String(delayMs)],
   );
 
   return rows[0] ? stripInternalColumns(rows[0]) : null;

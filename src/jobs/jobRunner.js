@@ -122,8 +122,30 @@ export async function runOnce({ type, signal } = {}) {
     const completed = await jobsRepository.completeJob(job.id, { progress: 100 });
     return { outcome: 'completed', job: completed, result };
   } catch (error) {
-    const retry = shouldRetry(job, error);
     const message = describeJobFailure(error);
+
+    // Provider quota exhaustion is handled before retry policy. It is not a
+    // flaky failure and it is not the job's fault: the free tier allows 20
+    // requests per model and then answers "Please retry in 3h14m13s". Retrying
+    // in 2s cannot succeed, and doing so spends all three attempts and
+    // permanently fails 61 images that were never analysed. So the attempt is
+    // handed back and the job is parked for the window the API itself stated.
+    if (error?.quota === true) {
+      const delayMs = error.retryAfterMs ?? QUOTA_FALLBACK_DELAY_MS;
+      const deferred = await jobsRepository.deferJob(job.id, { error: message, delayMs });
+
+      logger.warn('Provider quota exhausted; deferring job', {
+        jobId: job.id,
+        type: job.type,
+        model: error.model,
+        deferMs: delayMs,
+        error: message,
+      });
+
+      return { outcome: 'deferred', job: deferred, error, delayMs };
+    }
+
+    const retry = shouldRetry(job, error);
 
     const updated = await jobsRepository.failJobAttempt(job.id, {
       error: message,
@@ -169,7 +191,9 @@ export async function runOnce({ type, signal } = {}) {
  * @param {(info: object) => void} [options.onProgress]
  * @param {AbortSignal} [options.signal]
  * @param {() => Promise<{ allowed: boolean, reasons: string[] }>} [options.checkBudget]
- * @returns {Promise<{ completed: number, retried: number, failed: number, hitJobCap: boolean, stoppedByBudget: boolean }>}
+ * @returns {Promise<{ completed: number, retried: number, failed: number,
+ *   deferred: number, hitJobCap: boolean, stoppedByBudget: boolean,
+ *   stoppedByQuota: boolean, quotaError: Error | null }>}
  */
 export async function runUntilEmpty({
   type,
@@ -182,11 +206,18 @@ export async function runUntilEmpty({
     completed: 0,
     retried: 0,
     failed: 0,
+    deferred: 0,
     hitJobCap: false,
     stoppedByBudget: false,
+    stoppedByQuota: false,
+    quotaError: null,
   };
 
-  for (let processed = 0; processed < maxJobs; processed += 1) {
+  // Declared outside the loop: the post-loop job-cap check reads it, and a
+  // `let` in the header would put it out of scope there.
+  let processed = 0;
+
+  for (; processed < maxJobs; processed += 1) {
     if (signal?.aborted) {
       break;
     }
@@ -213,6 +244,16 @@ export async function runUntilEmpty({
 
     if (outcome === 'completed') {
       summary.completed += 1;
+    } else if (outcome === 'deferred') {
+      // Stop, do not continue. The quota is per model, not per image, so the
+      // very next claim would hit the same wall. Carrying on would defer the
+      // remaining 60 jobs one at a time and bury the single message that
+      // actually explains what happened.
+      summary.deferred += 1;
+      summary.stoppedByQuota = true;
+      summary.quotaError = error;
+      onProgress?.({ event: 'deferred', job, error, delayMs });
+      break;
     } else if (outcome === 'retry') {
       summary.retried += 1;
       const delay = backoffDelayMs(job.attempts);
@@ -230,6 +271,13 @@ export async function runUntilEmpty({
 
   return summary;
 }
+
+/**
+ * Used when the provider reports a quota wall but no recovery window.
+ * An hour is deliberately long: guessing short is what turns a quota limit into
+ * 183 pointless requests.
+ */
+const QUOTA_FALLBACK_DELAY_MS = 60 * 60 * 1000;
 
 function describeJobFailure(error) {
   if (error instanceof Error) {

@@ -45,17 +45,35 @@ export function createVisionJobHandler({ visionProvider, modelVersion = DEFAULT_
     await imagesRepository.updateImageStatus(image.id, 'PROCESSING');
     await updateProgress(10);
 
-    const result = await analyseImage({
-      image,
-      visionProvider,
-      modelVersion,
-      jobId: job.id,
-      signal,
-    });
+    try {
+      return await analyseImage({
+        image,
+        visionProvider,
+        modelVersion,
+        jobId: job.id,
+        signal,
+      });
+    } catch (error) {
+      // Return the image to PENDING before rethrowing.
+      //
+      // The status was set to PROCESSING optimistically, so any failure — a
+      // provider timeout, or a quota wall that will not clear for three hours —
+      // would otherwise leave the row claiming to be in flight forever, with no
+      // job actually running. The observed effect of not doing this was 61
+      // images stuck in PROCESSING while the jobs table showed every one of them
+      // FAILED, which reads as a corrupt database rather than a throttled run.
+      //
+      // Deferral matters here: a deferred job is going to be retried later, and
+      // PENDING is exactly the state it will be claimed from.
+      await imagesRepository.updateImageStatus(image.id, 'PENDING').catch((statusError) => {
+        logger.error('Failed to reset image status after a failed attempt', {
+          imageId: image.id,
+          error: statusError.message,
+        });
+      });
 
-    await updateProgress(90);
-
-    return result;
+      throw error;
+    }
   };
 }
 
@@ -85,6 +103,9 @@ export function createEmbeddingJobHandler({ embeddingProvider, modelVersion = DE
       modelVersion,
       jobId: job.id,
       signal,
+      // Which analysis to embed, recorded by ingestion. See embedImageCaption.
+      metadataId: job.payload?.metadataId ?? null,
+      visionModel: job.payload?.visionModel ?? null,
     });
 
     await updateProgress(90);

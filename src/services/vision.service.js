@@ -186,14 +186,43 @@ export async function embedImageCaption({
   modelVersion = DEFAULT_MODEL_VERSION,
   jobId = null,
   signal,
+  metadataId = null,
+  visionModel = null,
 }) {
-  const metadata = await imagesRepository.findImageMetadata(image.id, {
-    model: embeddingProvider.model,
-  });
+  // Resolve the analysis to embed.
+  //
+  // The obvious implementation — look up metadata "for the embedding model" —
+  // is wrong twice over. The vision model and the embedding model are different
+  // models with different ids, so that lookup finds nothing and every embedding
+  // job fails permanently with "has no vision metadata to embed". And searching
+  // by "most recent row" would silently re-point the embedding at a different
+  // analysis once a second prompt version exists.
+  //
+  // So the job records which metadata row it means to embed, and that id is
+  // authoritative. The model-based lookup remains only as a fallback for a job
+  // enqueued without one.
+  let metadata = null;
+
+  if (metadataId) {
+    metadata = await imagesRepository.findImageMetadataById(metadataId);
+  } else if (visionModel) {
+    metadata = await imagesRepository.findImageMetadata(image.id, { model: visionModel });
+  }
 
   if (!metadata) {
     throw Object.assign(
-      new Error(`image ${image.id} has no vision metadata to embed`),
+      new Error(`image ${image.id} has no validated vision analysis to embed`),
+      { transient: false },
+    );
+  }
+
+  // Guard the invariant the id was supposed to guarantee: never embed a caption
+  // that failed schema validation.
+  if (!['VALID', 'LOW_CONFIDENCE'].includes(metadata.validation_status)) {
+    throw Object.assign(
+      new Error(
+        `image ${image.id} metadata ${metadata.id} is ${metadata.validation_status}; refusing to embed it`,
+      ),
       { transient: false },
     );
   }

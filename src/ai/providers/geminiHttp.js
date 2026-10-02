@@ -34,6 +34,56 @@ const TRANSIENT_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 const PERMANENT_STATUSES = new Set([400, 401, 403, 404, 413, 422]);
 
 /**
+ * Detect a free-tier QUOTA exhaustion, as distinct from ordinary rate limiting.
+ *
+ * Measured during Phase 2: the free tier allows 20 `generateContent` requests
+ * per model, and once exceeded the API answers
+ *
+ *   "Quota exceeded for metric: ...generate_content_free_tier_requests,
+ *    limit: 20, model: gemini-3.8-flash
+ *    Please retry in 3h14m13.070992014s."
+ *
+ * This is categorically different from a 503 "high demand", and treating it as
+ * an ordinary transient failure is actively harmful. Retrying with a 2s/4s
+ * backoff cannot succeed for three hours; it just spends all three attempts,
+ * fails 61 images, and leaves every one of them needing manual repair. So the
+ * error carries the window the API itself reported and the job runner parks the
+ * work instead of burning retries on it.
+ *
+ * @param {string} message provider error text
+ * @param {number} status HTTP status
+ * @returns {{ quota?: true, retryAfterMs?: number }}
+ */
+export function classifyQuota(message, status) {
+  if (status !== 429 && !/quota/i.test(message)) {
+    return {};
+  }
+
+  if (!/quota/i.test(message)) {
+    return {};
+  }
+
+  // "Please retry in 3h14m13.070992014s" — hours, minutes, seconds may each be
+  // absent, so each group is optional and any part may carry a fraction.
+  const match = /retry in (?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:([\d.]+)s)?/i.exec(message);
+
+  if (!match) {
+    // Quota exhaustion with no stated window: fall back to a full hour rather
+    // than retrying immediately, which is what caused the harm.
+    return { quota: true, retryAfterMs: 60 * 60 * 1000 };
+  }
+
+  const [, hours, minutes, seconds] = match;
+  const retryAfterMs = (Number(hours ?? 0) * 3600)
+    + (Number(minutes ?? 0) * 60)
+    + Number(seconds ?? 0);
+
+  // Guard the floor: a provider that says "retry in 0s" must not produce a tight
+  // retry loop.
+  return { quota: true, retryAfterMs: Math.max(retryAfterMs, 60) * 1000 };
+}
+
+/**
  * An error from a provider call, carrying enough structure for the job runner
  * to decide whether to retry and for the cost tracker to persist a real reason.
  */
@@ -45,15 +95,27 @@ export class ProviderError extends Error {
    * @param {string} [details.model]
    * @param {number} [details.status] HTTP status, 0 for a transport failure
    * @param {boolean} [details.transient]
+   * @param {boolean} [details.quota] free-tier quota exhausted; defer, do not retry
+   * @param {number} [details.retryAfterMs] window the provider asked us to wait
    * @param {unknown} [details.body] parsed provider error payload
    */
-  constructor(message, { provider, model, status = 0, transient = false, body } = {}) {
+  constructor(message, {
+    provider,
+    model,
+    status = 0,
+    transient = false,
+    quota = false,
+    retryAfterMs = null,
+    body,
+  } = {}) {
     super(message, { cause: body });
     this.name = 'ProviderError';
     this.provider = provider;
     this.model = model;
     this.status = status;
     this.transient = transient;
+    this.quota = quota;
+    this.retryAfterMs = retryAfterMs;
     this.body = body;
   }
 }
@@ -163,6 +225,7 @@ export async function callGemini({
       status: response.status,
       transient: isTransientStatus(response.status),
       body: payload?.error ?? payload,
+      ...classifyQuota(message, response.status),
     });
   }
 

@@ -253,15 +253,21 @@ export async function enqueueEmbeddingsForAnalysedImages({
     return { enqueued: 0, skipped: 0 };
   }
 
+  // DISTINCT ON picks ONE validated analysis per image — the most recent — and
+  // records its id on the job. It is not enough to select the image_id: the
+  // handler needs to embed a specific caption, and "whichever row sorts last"
+  // stops being the right answer the moment a second prompt version exists.
+  // LOW_CONFIDENCE is included because a flagged caption is still a usable
+  // caption, and the flag travels with the metadata row for Phase 3's guard.
   const { rows: candidates } = await query(
-    `SELECT DISTINCT m.image_id
+    `SELECT DISTINCT ON (m.image_id) m.id AS metadata_id, m.image_id, m.model AS vision_model
      FROM image_metadata m
      WHERE m.validation_status IN ('VALID', 'LOW_CONFIDENCE')
        AND NOT EXISTS (
          SELECT 1 FROM image_embeddings e
          WHERE e.image_id = m.image_id AND e.model = $1
        )
-     ORDER BY m.image_id
+     ORDER BY m.image_id, m.created_at DESC
      LIMIT $2`,
     [model, limit],
   );
@@ -283,6 +289,10 @@ export async function enqueueEmbeddingsForAnalysedImages({
       entityId: candidate.image_id,
       idempotencyKey,
       maxAttempts: 3,
+      payload: {
+        metadataId: candidate.metadata_id,
+        visionModel: candidate.vision_model,
+      },
     });
 
     if (created) {

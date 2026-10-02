@@ -35,17 +35,30 @@ const MAX_ERROR_LENGTH = 2_000;
 /**
  * Execute a provider call and persist its cost record.
  *
+ * `fn` must resolve to the provider's own response object, which by convention
+ * carries a `usage` property alongside its payload — `{ rawOutput, usage }` for
+ * vision, `{ vector, usage }` for embeddings. That object is returned UNCHANGED,
+ * so tracking cannot alter behaviour it observes.
+ *
+ * Getting this contract wrong is silent: an earlier version destructured
+ * `{ result, usage }`, which no provider returns, so `result` was always
+ * undefined and every caller that destructured the response got a TypeError
+ * *after* the provider had succeeded and the cost row had been written. The
+ * resulting ai_calls table looked healthy — 6 SUCCESS rows — while zero images
+ * were analysed. This shape avoids reintroducing that class of bug: usage is
+ * read from the same object that is handed back.
+ *
  * @template T
  * @param {TrackedCall} call
- * @param {() => Promise<{ result: T, usage: Record<string, number | null> }>} fn
- * @returns {Promise<T>}
+ * @param {() => Promise<T>} fn resolves to `{ ...payload, usage }`
+ * @returns {Promise<T>} exactly what `fn` resolved to
  */
 export async function trackCall({ provider, model, operation, jobId = null }, fn) {
   let outcome;
 
   try {
-    const { result, usage } = await fn();
-    outcome = { ok: true, result, usage };
+    const response = await fn();
+    outcome = { ok: true, response, usage: response?.usage ?? null };
   } catch (error) {
     // Any usage attached to the error is still billed. Providers do not
     // consistently return it on failure, but Gemini includes usageMetadata on
@@ -76,7 +89,7 @@ export async function trackCall({ provider, model, operation, jobId = null }, fn
   }
 
   if (outcome.ok) {
-    return outcome.result;
+    return outcome.response;
   }
 
   throw outcome.error;

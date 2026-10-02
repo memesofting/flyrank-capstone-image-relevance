@@ -100,6 +100,17 @@ class UsageError extends Error {}
 /** Plain lines on purpose: this is operator-facing CLI output, not JSON logs. */
 const say = (line = '') => process.stdout.write(`${line}\n`);
 
+function formatDuration(ms) {
+  const totalSeconds = Math.round(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) return `${hours}h${minutes}m`;
+  if (minutes > 0) return `${minutes}m${seconds}s`;
+  return `${seconds}s`;
+}
+
 function heading(text) {
   say();
   say(text);
@@ -203,7 +214,9 @@ async function main() {
   }
 
   // --- run -----------------------------------------------------------------
-  const totals = { completed: 0, retried: 0, failed: 0 };
+  let quotaStopped = false;
+
+  const totals = { completed: 0, retried: 0, failed: 0, deferred: 0 };
 
   if (args.stage === 'vision' || args.stage === 'all') {
     heading('Vision analysis');
@@ -216,6 +229,8 @@ async function main() {
       onProgress: (info) => {
         if (info.event === 'retry') {
           say(`[vision] job=${info.job.id} status=retry attempt=${info.job.attempts} in ${info.delayMs}ms`);
+        } else if (info.event === 'deferred') {
+          say(`[vision] job=${info.job.id} status=deferred wait=${formatDuration(info.delayMs)}`);
         } else if (info.event === 'failed') {
           say(`[vision] job=${info.job.id} status=failed error=${info.error?.message ?? info.error}`);
         }
@@ -225,7 +240,12 @@ async function main() {
     totals.completed += summary.completed;
     totals.retried += summary.retried;
     totals.failed += summary.failed;
-    say(`[vision] completed=${summary.completed} retried=${summary.retried} failed=${summary.failed}`);
+    totals.deferred += summary.deferred;
+    say(`[vision] completed=${summary.completed} retried=${summary.retried} deferred=${summary.deferred} failed=${summary.failed}`);
+
+    if (summary.stoppedByQuota) {
+      quotaStopped = true;
+    }
   }
 
   if (args.stage === 'embed' || args.stage === 'all') {
@@ -243,6 +263,8 @@ async function main() {
       onProgress: (info) => {
         if (info.event === 'retry') {
           say(`[embed] job=${info.job.id} status=retry attempt=${info.job.attempts}`);
+        } else if (info.event === 'deferred') {
+          say(`[embed] job=${info.job.id} status=deferred wait=${formatDuration(info.delayMs)}`);
         } else if (info.event === 'failed') {
           say(`[embed] job=${info.job.id} status=failed error=${info.error?.message ?? info.error}`);
         }
@@ -252,7 +274,12 @@ async function main() {
     totals.completed += summary.completed;
     totals.retried += summary.retried;
     totals.failed += summary.failed;
-    say(`[embed] completed=${summary.completed} retried=${summary.retried} failed=${summary.failed}`);
+    totals.deferred += summary.deferred;
+    say(`[embed] completed=${summary.completed} retried=${summary.retried} deferred=${summary.deferred} failed=${summary.failed}`);
+
+    if (summary.stoppedByQuota) {
+      quotaStopped = true;
+    }
   }
 
   // --- report --------------------------------------------------------------
@@ -296,7 +323,16 @@ async function main() {
   }
 
   say();
-  say(`totals: completed=${totals.completed} retried=${totals.retried} failed=${totals.failed}`);
+  say(`totals: completed=${totals.completed} retried=${totals.retried} deferred=${totals.deferred} failed=${totals.failed}`);
+
+  if (quotaStopped) {
+    say();
+    say('PAUSED: the provider free-tier quota is exhausted.');
+    say('This is a rate limit, not a failure. Work already completed is saved;');
+    say('unstarted images are still PENDING and will be picked up by the next run.');
+    say('No attempt budget was spent, so no image was marked FAILED for this.');
+    return 1;
+  }
 
   if (totals.failed > 0) {
     say();
