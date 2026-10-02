@@ -27,7 +27,9 @@
     "corpus:verify": "node scripts/verify-corpus.js",
     "test": "node --test \"tests/unit/**/*.test.js\"",
     "test:integration": "node --test \"tests/integration/**/*.test.js\"",
-    "test:all": "node --test \"tests/unit/**/*.test.js\" \"tests/integration/**/*.test.js\""
+    "test:all": "node --test \"tests/unit/**/*.test.js\" \"tests/integration/**/*.test.js\"",
+    "process:corpus": "node scripts/process-corpus.js",
+    "costs": "node scripts/report-costs.js"
   },
   "dependencies": {
     "dotenv": "^18.0.5",

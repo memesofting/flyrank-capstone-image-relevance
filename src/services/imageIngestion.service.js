@@ -16,6 +16,7 @@
 
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { sha256Hex } from '../utils/hashing.js';
 import { inspectImageBuffer } from '../utils/image.js';
@@ -31,6 +32,17 @@ import {
 import { PROMPT_VERSION } from '../config/constants.js';
 
 export const CORPUS_MANIFEST_PATH = 'dataset/manifest.json';
+
+/**
+ * Resolve the corpus root that manifest paths are relative to.
+ *
+ * Manifest entries look like "images/fox/fox-001.jpg", i.e. relative to the
+ * directory CONTAINING the manifest, matching scripts/verify-corpus.js. Deriving
+ * this from import.meta.url rather than from process.cwd() means ingestion
+ * behaves identically however the script is invoked, which is also why the
+ * Phase 1 unit tests are documented as needing to run from the repository root.
+ */
+export const CORPUS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'dataset');
 
 /**
  * @typedef {object} IngestionSummary
@@ -60,7 +72,7 @@ export async function ingestCorpus({
   modelVersion = DEFAULT_MODEL_VERSION,
   promptVersion = PROMPT_VERSION,
   maxImages = null,
-  dataDir = path.dirname(path.dirname(manifestPath)),
+  dataDir = path.dirname(path.resolve(manifestPath)),
 } = {}) {
   const summary = {
     seen: 0,

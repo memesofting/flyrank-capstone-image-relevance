@@ -15,11 +15,11 @@ import * as aiCallsRepository from '../../repositories/aiCalls.repository.js';
 import { estimateCostUsd } from './pricing.js';
 
 /**
- * SQL interval expressions. Passed as fixed strings, never interpolated from
- * user input — these are not parameters.
+ * INTERVAL values, passed to the repository as bind parameters and cast with
+ * `::interval`. Values, not SQL fragments.
  */
-const DAILY_INTERVAL = "INTERVAL '1 day'";
-const MONTHLY_INTERVAL = "INTERVAL '1 month'";
+const DAILY_INTERVAL = '1 day';
+const MONTHLY_INTERVAL = '1 month';
 
 /**
  * @typedef {object} BudgetStatus
@@ -47,8 +47,8 @@ export async function checkBudget({
   monthlyLimitUsd = env.AI_MONTHLY_BUDGET_USD ?? null,
 } = {}) {
   const [daily, monthly] = await Promise.all([
-    aiCallsRepository.summariseAiCalls({ sinceInterval: DAILY_INTERVAL }),
-    aiCallsRepository.summariseAiCalls({ sinceInterval: MONTHLY_INTERVAL }),
+    aiCallsRepository.summariseAiCalls({ windowInterval: DAILY_INTERVAL }),
+    aiCallsRepository.summariseAiCalls({ windowInterval: MONTHLY_INTERVAL }),
   ]);
 
   const dailySpendUsd = Number(daily.estimated_cost_usd ?? 0);

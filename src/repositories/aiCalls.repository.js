@@ -102,16 +102,17 @@ export async function listAiCalls({ limit = 50, operation, status } = {}) {
 /**
  * Aggregate call and spend totals, optionally over a time window.
  *
- * The budget guard and the cost report both read this. The window is expressed
- * as an interval so "today" and "this month" follow the database's clock rather
- * than the Node process's, which would otherwise disagree with it whenever the
- * two are in different zones.
+ * `windowInterval` is an INTERVAL *value* such as '1 day', passed as a bind
+ * parameter and applied as `NOW() + $1::interval`. Deliberately not SQL text:
+ * building the expression by string concatenation is how
+ * `NOW() INTERVAL '1 day'` (missing the `+`) shipped as a syntax error.
  *
- * @param {{ sinceInterval?: string }} [options]
+ * The window is anchored to the database's clock rather than the Node process's,
+ * which would otherwise disagree whenever the two sit in different zones.
+ *
+ * @param {{ windowInterval?: string | null }} [options]
  */
-export async function summariseAiCalls({ sinceInterval = null } = {}) {
-  const windowClause = sinceInterval ? `WHERE created_at >= NOW() ${sinceInterval}` : '';
-
+export async function summariseAiCalls({ windowInterval = null } = {}) {
   const { rows } = await query(
     `SELECT
        COUNT(*)::int                                          AS total_calls,
@@ -122,7 +123,8 @@ export async function summariseAiCalls({ sinceInterval = null } = {}) {
        COALESCE(SUM(output_units), 0)                          AS output_units,
        COALESCE(SUM(estimated_cost_usd), 0)                    AS estimated_cost_usd
      FROM ai_calls
-     ${windowClause}`,
+     WHERE ($1::interval IS NULL OR created_at >= NOW() + $1::interval)`,
+    [windowInterval],
   );
 
   return rows[0];
@@ -131,11 +133,9 @@ export async function summariseAiCalls({ sinceInterval = null } = {}) {
 /**
  * Per-model breakdown for the cost report.
  *
- * @param {{ sinceInterval?: string }} [options]
+ * @param {{ windowInterval?: string | null }} [options]
  */
-export async function summariseAiCallsByModel({ sinceInterval = null } = {}) {
-  const windowClause = sinceInterval ? `WHERE created_at >= NOW() ${sinceInterval}` : '';
-
+export async function summariseAiCallsByModel({ windowInterval = null } = {}) {
   const { rows } = await query(
     `SELECT
        provider,
@@ -149,9 +149,10 @@ export async function summariseAiCallsByModel({ sinceInterval = null } = {}) {
        MIN(created_at)                                 AS first_call_at,
        MAX(created_at)                                 AS last_call_at
      FROM ai_calls
-     ${windowClause}
+     WHERE ($1::interval IS NULL OR created_at >= NOW() + $1::interval)
      GROUP BY provider, model, operation
      ORDER BY estimated_cost_usd DESC, calls DESC`,
+    [windowInterval],
   );
 
   return rows;

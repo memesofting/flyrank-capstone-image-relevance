@@ -127,6 +127,21 @@ corpus-fetch: ## Download missing corpus images (idempotent)
 corpus-verify: ## Verify hashes, dimensions, licences, provenance and the 40+/4+ targets
 	npm run corpus:verify
 
+# --- phase 2: vision pipeline --------------------------------------------
+# These call a provider and spend money. They are deliberately separate from
+# `make check`, which must stay runnable offline and free.
+.PHONY: process
+process: ## Analyse every corpus image, embed captions, and report costs
+	npm run process:corpus
+
+.PHONY: process-dry
+process-dry: ## Show what a corpus run would do. No provider calls, no cost
+	npm run process:corpus -- --dry-run
+
+.PHONY: costs
+costs: ## Show AI spend per provider/model/operation and budget status
+	npm run costs
+
 # --- verification --------------------------------------------------------
 # The same set CI runs. 'make check' is the single command that proves Phase 1.
 .PHONY: check
