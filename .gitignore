@@ -141,3 +141,25 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+.freebuff
+
+# ---------------------------------------------------------------------------
+# Capstone-specific ignores
+# ---------------------------------------------------------------------------
+
+# Local environment / secrets. Only .env.example is committed.
+.env
+.env.*
+!.env.example
+
+# Uploaded image bytes served by the API (Phase 2+).
+# The curated corpus under dataset/images/ IS committed on purpose.
+storage/
+data/
+
+# Local database dumps and migration scratch files.
+*.sql.gz
+*.dump
+db/*.tmp
+

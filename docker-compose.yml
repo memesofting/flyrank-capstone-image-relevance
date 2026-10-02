@@ -1,0 +1,35 @@
+# Local PostgreSQL for the capstone.
+#
+# The image bundles PostgreSQL 17 with the pgvector extension, so `vector`
+# is available to migrations (see src/db/migrations/001_extensions_and_core.sql).
+#
+# Credentials come from .env (see .env.example) with local-friendly defaults.
+# ${VAR:-default} means: use the .env value, else use the default.
+#
+#   docker compose up -d
+#
+# Host port 5433 maps to container port 5432, so DATABASE_URL uses 5433.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: image_matcher_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-image_matcher}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      # Named volume, not a bind mount: data survives `docker compose down`
+      # and container recreation. `docker compose down -v` deletes it.
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-image_matcher}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+    name: image_matcher_postgres_data
