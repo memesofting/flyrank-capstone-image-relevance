@@ -1,0 +1,108 @@
+# Capstone manifest
+#
+# Commands are the real, verified ones for this repository.
+# `npm run db:rollback` takes an optional count, e.g. `npm run db:rollback -- 3`.
+
+project:
+  name: flyrank-capstone-image-relevance
+  title: AI Image Understanding & Content Matching Engine
+  track: FlyRank Backend Track
+  phase: 1
+  phase_status: complete
+  language: javascript
+  runtime: node.js
+  license: MIT
+
+# --- run -------------------------------------------------------------------
+# The API alone:
+run: npm start
+# The full local stack (PostgreSQL 17 + pgvector), then migrate, then start:
+run_full: |
+  docker compose up -d && npm run db:migrate && npm start
+base_url: http://localhost:3000
+
+setup:
+  install: npm install
+  env: cp .env.example .env
+  database: docker compose up -d
+  migrate: npm run db:migrate
+
+# --- seed ------------------------------------------------------------------
+# The image corpus is rebuilt from its manifest rather than from a dump.
+# `fetch` is idempotent: on a complete corpus it fetches nothing.
+seed: npm run corpus:fetch
+seed_verify: npm run corpus:verify
+# The verification posts from the Phase 1 smoke test:
+seed_smoke: |
+  curl -X POST http://localhost:3000/api/posts \
+    -H 'content-type: application/json' \
+    -d '{"title":"The Behavior of Red Foxes","content":"Red foxes are small omnivorous canids that live in woodland and hunt alone."}'
+
+# --- test ------------------------------------------------------------------
+test: npm test
+test_integration: npm run test:integration
+test_all: npm run test:all
+
+# --- evaluation ------------------------------------------------------------
+# Phase 4. Not implemented yet; top-1 precision is not yet measured.
+eval: npm run eval
+eval_status: not_implemented
+
+# --- endpoints -------------------------------------------------------------
+# Phase 1 implemented:
+endpoints:
+  - GET /health
+  - GET /health/ready
+  - POST /api/posts
+  - GET /api/posts
+  - GET /api/posts/:id
+
+# Planned for Phases 2-4, not yet implemented:
+endpoints_planned:
+  - POST /api/images
+  - GET /api/images
+  - GET /api/images/:id
+  - POST /api/posts/:id/images
+  - GET /api/suggestions
+  - POST /api/suggestions/:id/review
+  - GET /api/jobs/:id
+  - GET /api/costs
+  - GET /api/evaluation
+
+# --- stack -----------------------------------------------------------------
+stack:
+  http: express@5
+  validation: zod@4
+  database: postgresql@17
+  vector_extension: pgvector
+  images: sharp
+  migrations: hand-rolled SQL runner (see docs/adr/001-migration-runner.md)
+
+# --- dataset ---------------------------------------------------------------
+dataset:
+  manifest: dataset/manifest.json
+  schema: dataset/manifest.schema.json
+  verified_images: 45
+  categories_populated: 6
+  unverified_held_aside: 16
+  total_size_mib: 11.1
+  source: unsplash
+  license: Unsplash License
+
+# --- measured results ------------------------------------------------------
+metrics:
+  tests_total: 104
+  tests_passing: 104
+  unit_tests: 77
+  integration_tests: 27
+  top1_precision: null   # not measured until Phase 4
+
+documentation:
+  design: docs/ONE-PAGE-DESIGN.md
+  architecture: docs/PROJECT-ARCHITECTURE.md
+  api: docs/API.md
+  database: docs/DATABASE.md
+  dataset_doc: docs/DATASET.md
+  adrs: docs/adr
+  evidence: EVIDENCE.md
+  buildlog: BUILDLOG.md
